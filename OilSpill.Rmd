@@ -1,0 +1,512 @@
+---
+title: "Pipeline Accident Analysis"
+author: "Jiayang (Lyra) Wang"
+date: "7/17/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+```
+
+```{r packages, include=FALSE}
+# packages
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(tidyr)
+library(extrafont)
+library(tidyverse)
+library(poorman)
+library(sf)
+library(ggmap)
+library(rlang)
+library(rjson)
+library(magrittr)
+library(mapview)
+library(scales)
+library(usmap)
+library(maps)
+library(mapdata)
+library(stringr)
+library(ggforce)
+library(giscoR)
+
+install.packages("giscoR")
+
+# import font
+loadfonts(quiet = T)
+windowsFonts("Franklin Gothic Book" = windowsFont("Franklin Gothic Book"))
+
+# Bootstrapping Function Definition
+sample_mean <- function(data, indices){
+  sample <- data[indices]
+  bar <- mean(sample)
+  return(bar)
+}
+```
+
+```{r data import}
+# data import - "Oil Pipeline Accidents, 2010 - Present" data set from Kaggle
+df <- read.csv("C:/Users/wangly0/Desktop/database.csv")
+```
+
+Pipeline incidents lead to severe social and environmental costs. In this document, we aim to analyze the cause for crude oil pipeline incidents and discuss policy progress and potential improvements. 
+
+The first step of this analysis is to understand the data set on hand.  1) what are the variables; 2) missing value issues
+```{r column name, echo=FALSE, message=TRUE}
+# display column names of this data set
+colnames(df)
+
+# missing data analysis
+dfNA <- df %>% 
+  # identify missing values with NA - not all missing values were marked with NA
+  mutate(across(everything(), ~replace(., . == "", NA))) %>% 
+  # count the number of missing values in the data set
+  summarise_all(~sum(is.na(.))) %>% 
+  # create data frame with two columns: variable in the data set, count of NA values in the variable
+  gather(Variable, NACount, 1:48, factor_key = TRUE) %>% 
+  # remove variables that do not have NA values
+  filter(NACount != 0) %>% 
+  # arrange variables by descending order of NA values
+  arrange(-NACount) %>% 
+  # calculate percentage of missing value 
+  mutate(Percentage = round(NACount/nrow(df),3))
+
+dfNA
+
+write.csv(dfNA, "C:/Users/wangly0/Desktop/NA.csv",row.names = FALSE)
+  
+# replace NA values with zero and binary (yes/no) values
+df <- df %>% 
+  # replace NA values in fatalities, injuries, release barrels, and costs with 0
+  mutate_at(vars(Operator.Employee.Fatalities,
+                 Operator.Contractor.Fatalities,
+                 Emergency.Responder.Fatalities,
+                 Other.Fatalities,
+                 Public.Fatalities,
+                 All.Fatalities,
+                 Operator.Employee.Injuries,
+                 Operator.Contractor.Injuries,
+                 Emergency.Responder.Injuries,
+                 Other.Injuries,
+                 Public.Injuries,
+                 All.Injuries,
+                 Intentional.Release..Barrels.,
+                 Other.Costs,
+                 Public.Private.Property.Damage.Costs,
+                 Environmental.Remediation.Costs,
+                 Property.Damage.Costs,
+                 Emergency.Response.Costs,
+                 Lost.Commodity.Costs), 
+            ~replace_na(., 0)) %>% 
+  # replace NA values as binary "NO" for variable
+  mutate_at(vars(Pipeline.Shutdown),
+            ~replace_na(.,"NO"))
+```
+There are a few observations under offshore that are outside of US boundaries. Figure below shows the 
+```{r}
+# replace NA values in Accident.State based on coordinate information 
+dfGeo <- df %>% 
+  filter(Pipeline.Location == "OFFSHORE") %>% 
+  filter(Accident.State == "") %>% 
+  select(Accident.Latitude, Accident.Longitude)
+
+dfGeo1 <- df %>% 
+  filter(Pipeline.Location == "OFFSHORE") %>% 
+  filter(Accident.State != "") %>% 
+  select(Accident.Latitude, Accident.Longitude)
+
+mapview(dfGeo, xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "red", layer.name = c("NA Value"))+
+  mapview(dfGeo1, xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "blue", layer.name = c("Louisiana"))
+
+# replace NA with "Gulf of Mexico"
+df<- df %>% 
+  mutate(Accident.State = ifelse(Accident.State == "", "Gulf of Mexico", Accident.State))
+
+# create a map view of all the crude oil incidents in the data set
+  mapview(df[df$Liquid.Type == "CRUDE OIL" & df$Pipeline.Location == "ONSHORE",], xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "#ffbf00", layer.name = c("Onshore")) +
+  mapview(df[df$Liquid.Type == "CRUDE OIL" & df$Pipeline.Location == "OFFSHORE",],xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "darkgreen", layer.name = c("Offshore"))
+  
+# remove one wrong coordinates from the data set and create crude oil only data set
+dfCO <- df %>% 
+    # remove coordinates that land in Asia
+    filter(Accident.Latitude != 41.890476) %>% 
+    # remove coordinates that land in Canada
+    filter(Accident.Latitude != 50.839319) %>% 
+    filter(Liquid.Type == "CRUDE OIL")
+
+# map view of crude oil incidents after removing ones that do not belong to the US
+mapview(dfCO[dfCO$Pipeline.Location == "ONSHORE",], xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "#ffbf00", layer.name = c("Onshore")) +
+  mapview(dfCO[dfCO$Pipeline.Location == "OFFSHORE",],xcol =  "Accident.Longitude", ycol = "Accident.Latitude", crs = 4269, grid = FALSE, col.regions = "darkgreen", layer.name = c("Offshore"))
+
+# calculate the percentage of onshore and offshore crude oil incidents 
+dfCO %>% 
+  group_by(Pipeline.Location) %>% 
+  tally() %>% 
+  mutate(Percentage = round(n/sum(n),2))
+
+
+```
+Severity of crude oil pipeline accidents - total cost
+```{r}
+# check out the distribution of all costs
+dfCO %>% 
+  select(All.Costs) %>% 
+  summary()
+
+# calculate the total cost of crude oil damage
+dfCO %>% 
+  summarise(Total.Cost = sum(All.Costs))
+
+# total cost of crude oil spills 
+dfCO_Cost <- dfCO %>% 
+  filter(Accident.State != "Gulf of Mexico") %>% 
+  group_by(Accident.State) %>% 
+  summarise(Total.Cost = sum(All.Costs))
+
+test <- dfCO_Cost %>% 
+  rename(abbr = Accident.State) %>% 
+  right_join(statepop, by = "abbr") %>% 
+  select(fips, abbr, full, Total.Cost)
+
+plot_usmap(data = test, values = "Total.Cost", color = "red") + 
+  scale_fill_continuous(
+    low = "white", high = "darkblue", name = "Total Cost", label = scales::comma
+  ) + theme(legend.position = "right")
+
+
+```
+Severity of crude oil pipeline accident at state level
+```{r}
+# Classify states by cost
+dfCO_State <- dfCO %>% 
+  group_by(Accident.State) %>% 
+  summarise(Accident.Count = n(),
+            Property.Damage.Costs = sum(Property.Damage.Costs),
+            Lost.Commodity.Costs = sum(Lost.Commodity.Costs),
+            Public.Private.Property.Damage.Costs = sum(Public.Private.Property.Damage.Costs),
+            Emergency.Response.Costs = sum(Emergency.Response.Costs),
+            Environmental.Remediation.Costs =sum(Environmental.Remediation.Costs),
+            Other.Costs = sum(Other.Costs),
+            Total.Cost = sum(All.Costs),
+            Average.Cost = Total.Cost/Accident.Count) %>% 
+  arrange(-Total.Cost) %>% 
+  mutate(Size = ifelse(Total.Cost >100000000, ">100M",
+                       ifelse(Total.Cost <100000000 & Total.Cost>10000000, "10M ~ 100M",
+                              ifelse(Total.Cost<10000000 & Total.Cost>1000000, "1M ~ 10M", "<1M"))))
+dfCO_State
+dfCO_State %>% 
+  ungroup() %>% 
+  select(-Total.Cost) %>% 
+  gather(Cost.Category, Cost, Property.Damage.Costs:Average.Cost, factor_key = TRUE) %>% 
+  mutate(Size = factor(Size, levels = c(">100M", "10M ~ 100M", "1M ~ 10M", "<1M"))) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = reorder(Accident.State, -Cost), y = Cost, fill = Cost.Category),position = "stack", stat = "identity", width = 0.9)+
+  facet_row(vars(Size), scales = "free", space = "free")+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 8))+
+  scale_fill_brewer(palette = "Set3")+
+  labs(x = "", y = "Costs")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        text = element_text(size = 15, family = "Franklin Gothic Book"))
+
+ggsave(filename = "Cost.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 16)
+```
+
+Severity by looking at how common such things happen
+```{r}
+dfCO_State %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = reorder(Accident.State, -Average.Cost), y = Average.Cost, fill = Accident.State), stat = "identity")+
+  geom_text(mapping = aes(x = reorder(Accident.State, -Average.Cost), y = Average.Cost,label = Accident.Count), vjust = -0.2, size = 6)+
+  coord_cartesian(ylim = c(0, 17000000))+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 8))+
+  labs(x = "", y="Average Cost per Accident")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = "none",
+        legend.title = element_blank(),
+        text = element_text(size = 18, family = "Franklin Gothic Book"))
+
+ggsave(filename = "CostPerAccident.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 16)
+
+dfCO_State %>% 
+  arrange(-Average.Cost)
+```
+
+Distribution of accidents
+```{r}
+dfCO_State$Total.Cost <- as.numeric(dfCO_State$Total.Cost)
+
+dfCO
+
+dfCO %>% 
+  mutate(Pipeline.Type = ifelse(Pipeline.Type == "" & Pipeline.Location == "OFFSHORE", "OFFSHORE", Pipeline.Type)) %>% 
+  arrange(-All.Costs) %>% 
+  ungroup() %>% 
+  mutate(CumSum = cumsum(All.Costs)/sum(All.Costs),
+         CumCount = seq.int(nrow(dfCO))/nrow(dfCO)) %>%  
+  ggplot()+
+  geom_point(mapping = aes(x = CumCount, y = CumSum, color = Pipeline.Type), size = 3)+
+  scale_color_brewer(palette = "Dark2")+
+  labs(x = "Cumulative Count of Accidents", y = "Cumulative Cost of Accidents")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = "top",
+        legend.title = element_blank(),
+        text = element_text(size = 18, family = "Franklin Gothic Book"))
+
+ggsave(filename = "CostDistributionPipelineType.png", path = "C:/Users/wangly0/Desktop", height = 5, width = 9)
+```
+
+Histogram of accident by pipeline type
+```{r}
+dfCO %>% 
+  mutate(Pipeline.Type = ifelse(Pipeline.Type == "" & Pipeline.Location == "OFFSHORE", "OFFSHORE", Pipeline.Type)) %>% 
+  arrange(-All.Costs) %>% 
+  ungroup() %>% 
+  select(Pipeline.Type, All.Costs) %>% 
+  mutate(Count = 1) %>% 
+  group_by(Pipeline.Type) %>% 
+  summarise(Total.Cost = sum(All.Costs), Total.Count = sum(Count)) %>% 
+  gather(Category, Value, Total.Cost:Total.Count) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = Category,y = Value, fill = Pipeline.Type), position = "fill", stat = "identity")+
+  scale_fill_brewer(palette = "Dark2")+
+  labs(x = "", y = "")+
+  coord_flip()+
+  theme_bw()+
+  theme(legend.position = "none",
+        text = element_text(size = 18, family = "Franklin Gothic Book"))
+
+ggsave(filename = "CostCountPipelineType.png", path = "C:/Users/wangly0/Desktop", height = 3, width = 6)
+
+# percentage of each pipeline type
+dfCO %>% 
+  mutate(Pipeline.Type = ifelse(Pipeline.Type == "" & Pipeline.Location == "OFFSHORE", "OFFSHORE", Pipeline.Type)) %>% 
+  arrange(-All.Costs) %>% 
+  ungroup() %>% 
+  select(Pipeline.Type, All.Costs) %>% 
+  mutate(Count = 1) %>% 
+  group_by(Pipeline.Type) %>%
+  summarise(Total.Cost = sum(All.Costs), 
+            Total.Count = sum(Count)) %>% 
+  ungroup() %>% 
+  mutate(Total.Cost.Per = Total.Cost/sum(Total.Cost),
+         Total.Cound.Per = Total.Count/sum(Total.Count),
+         Cost.Accident = Total.Cost/Total.Count)
+```
+
+Analysis on cause of crude oil pipeline accidents
+```{r}
+dfCO %>% 
+  select(Pipeline.Location,Pipeline.Type, Cause.Category:Net.Loss..Barrels., Property.Damage.Costs:All.Costs) %>% 
+  group_by(Cause.Category, Cause.Subcategory) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n(),
+            Cost.Accident = Total.Cost/Count) %>% 
+  arrange(-Total.Cost)
+
+mapview(dfCO, xcol =  "Accident.Longitude", ycol = "Accident.Latitude",zcol = "Cause.Category", size = "All.Costs", crs = 4269, grid = FALSE, col.regions = c("darkgreen", "yellow", "darkblue", "orange", "gray","purple","lightblue"))
+
+dfCO %>% 
+  group_by(Cause.Category) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n()) %>% 
+  mutate_at(vars("Total.Cost", "Count"), as.numeric) %>% 
+  ungroup() %>% 
+  mutate(Cost.Accident = Total.Cost/Count,
+         Total.Cost.Per = Total.Cost/sum(Total.Cost)) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = "", y = Total.Cost.Per, fill = Cause.Category), stat = "identity", width = 1, color = "white")+
+  coord_polar("y", start = 0)+
+  labs(x = "", y = "")+
+  scale_fill_manual(values = c("darkgreen", "yellow", "darkblue", "orange", "gray","purple","lightblue"))+
+  theme_void()+
+  theme(legend.position = "none",
+        text = element_text(size = 18, family = "Franklin Gothic Book"))
+
+ggsave(filename = "MainCausePie.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 6)
+
+dfCO %>% 
+  group_by(Cause.Category) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n()) %>% 
+  mutate_at(vars("Total.Cost", "Count"), as.numeric) %>% 
+  ungroup() %>% 
+  mutate(Cost.Accident = Total.Cost/Count,
+         Total.Cost.Per = Total.Cost/sum(Total.Cost)) %>% 
+  arrange(-Total.Cost)
+```
+
+Material/weld/equip failure analysis
+```{r}
+dfCO %>% 
+  group_by(Cause.Category,Cause.Subcategory) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n()) %>% 
+  mutate_at(vars("Total.Cost", "Count"), as.numeric) %>% 
+  ungroup() %>% 
+  mutate(Cost.Accident = Total.Cost/Count,
+         Total.Cost.Per = Total.Cost/sum(Total.Cost)) %>% 
+  arrange(-Cost.Accident)
+
+dfCO %>% 
+  filter(Cause.Category == "MATERIAL/WELD/EQUIP FAILURE") %>% 
+  group_by(Cause.Subcategory) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n()) %>% 
+  mutate_at(vars("Total.Cost", "Count"), as.numeric) %>% 
+  ungroup() %>% 
+  mutate(Cost.Accident = Total.Cost/Count,
+         Total.Cost.Per = Total.Cost/sum(Total.Cost)) %>% 
+  arrange(-Cost.Accident) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = "", y = Total.Cost.Per, fill = Cause.Subcategory), stat = "identity", width = 1, color = "white")+
+  coord_polar("y", start = 0)+
+  labs(x = "", y = "")+
+  theme_void()+
+  theme(legend.position = "none",
+        text = element_text(size = 18, family = "Franklin Gothic Book"))
+
+ggsave(filename = "EquipFailurePie.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 6)
+
+dfCO %>% 
+  filter(Cause.Category == "MATERIAL/WELD/EQUIP FAILURE") %>% 
+  group_by(Cause.Subcategory) %>% 
+  summarise(Total.Cost = sum(All.Costs), 
+            Count = n()) %>% 
+  mutate_at(vars("Total.Cost", "Count"), as.numeric) %>% 
+  ungroup() %>% 
+  mutate(Cost.Accident = Total.Cost/Count,
+         Total.Cost.Per = Total.Cost/sum(Total.Cost),
+         Total.Count.Per = Count/sum(Count)) %>% 
+  arrange(-Cost.Accident)
+```
+improvement observed during the past 7 years
+```{r}
+dfCO %>% 
+  filter(Accident.Year != 2017) %>% 
+  group_by(Accident.Year) %>% 
+  summarise(Total.Cost = sum(All.Costs),
+            Count = n(),
+            Average.Cost = Total.Cost/Count) %>% 
+  ungroup() %>% 
+  mutate_at(vars(Total.Cost), as.numeric) %>% 
+  mutate(Total.Cost.Scale = Total.Cost/Total.Cost[Accident.Year == 2010],
+         Count.Scale = Count/Count[Accident.Year == 2010],
+         Average.Cost.Scale = Average.Cost/Average.Cost[Accident.Year == 2010]) %>% 
+  ggplot()+
+  geom_line(mapping = aes(x = Accident.Year, y = Total.Cost.Scale, color = "Total.Cost"), size = 1) +
+  geom_line(mapping = aes(x = Accident.Year, y = Average.Cost.Scale, color = "Average.Cost"), size = 1)+
+  geom_line(mapping = aes(x = Accident.Year, y = Count.Scale, color = "Count"), size = 1)+
+  scale_color_manual(name = "", values = c("Total.Cost" = "#ffbf00", "Average.Cost" = "darkgreen", "Count" = "#bf0000"))+
+  scale_x_continuous(breaks = c(2010,2011,2012,2013,2014,2015,2016,2017))+
+  labs(x = "", y = "Changes Compared to 2010 Baseline")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = c(0.15,0.85),
+        legend.title = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(color = "black"),
+        text = element_text(size = 16, family = "Franklin Gothic Book"))
+
+ggsave(filename = "Improvement.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 8)
+```
+
+Material/weld/equipment failure change over the years
+```{r}
+dfCO %>% 
+  filter(Cause.Category == "MATERIAL/WELD/EQUIP FAILURE") %>% 
+  group_by(Accident.Year, Cause.Subcategory) %>% 
+  summarise(Total.Cost = sum(All.Costs),
+            Count = n(),
+            Average.Cost = Total.Cost/Count) %>% 
+  ungroup() %>% 
+  mutate_at(vars(Total.Cost, Count), as.numeric) %>% 
+  ggplot()+
+  geom_bar(mapping = aes(x = Accident.Year, y = Total.Cost, fill = Cause.Subcategory), stat = "identity", position = "stack")+
+  labs(x = "", y = "Total Cost")+
+  scale_x_continuous(breaks = c(2010,2011,2012,2013,2014,2015,2016,2017))+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = c(0.6,0.6),
+        legend.title = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(color = "black"),
+        text = element_text(size = 16, family = "Franklin Gothic Book"))
+
+ggsave(filename = "ImprovementCause.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 8)
+
+dfCO %>% 
+  filter(Cause.Category == "MATERIAL/WELD/EQUIP FAILURE") %>% 
+  arrange(-All.Costs)
+
+dfCO %>% 
+  arrange(-All.Costs) %>% 
+  slice(1:10) %>% 
+  group_by(Accident.Year) %>% 
+  tally()
+```
+barrels lost compared to barrels transported
+```{r}
+Trans <- data.frame(Accident.Year = c(2010,2011,2012,2013,2014,2015,2016,2017),
+                    Barrels = c(593535000, 518308000, 561100000,599580000, 707823000, 918703000, 1000827000, 1183714000))
+
+# dfCO %>% 
+#   filter(Accident.Year != 2017) %>% 
+#   group_by(Accident.Year) %>% 
+#   summarise(Release = sum(Unintentional.Release..Barrels.,Intentional.Release..Barrels.),
+#             Recovery = sum(Liquid.Recovery..Barrels.),
+#             Net.Loss = sum(Net.Loss..Barrels.)) %>% 
+#   ungroup() %>% 
+#   left_join(Trans, by = "Accident.Year") %>% 
+#   mutate(Lost.Per = Net.Loss/Barrels) %>% 
+#   ggplot()+
+#   geom_line(mapping = aes(x = Accident.Year, y = Barrels, color = "Transported (Barrels)"))+
+#   geom_line(mapping = aes(x = Accident.Year, y = Release, color = "Released (Barrels)"))+
+#   geom_line(mapping = aes(x = Accident.Year, y = Recovery, color = "Recovered (Barrels)"))+
+#   geom_line(mapping = aes(x = Accident.Year, y = Net.Loss, color = "Net Loss (Barrels)"))+
+#   # scale_y_continuous(label = scales::percent)+
+#   scale_color_manual(name = "", values = c("Transported (Barrels)" = "#ffbf00",
+#                                            "Released (Barrels)" = "purple",
+#                                            "Recovered (Barrels)" = "red",
+#                                            "Net Loss (Barrels)" = "darkgreen"))
+
+
+dfCO %>% 
+  filter(Accident.Year != 2017) %>% 
+  group_by(Accident.Year) %>% 
+  summarise(Net.Loss = sum(Net.Loss..Barrels.)) %>% 
+  ungroup() %>% 
+  left_join(Trans, by = "Accident.Year") %>% 
+  mutate(Lost.Per = Net.Loss/Barrels) %>% 
+  ggplot()+
+  geom_line(mapping = aes(x = Accident.Year, y = Lost.Per), size = 1)+
+  scale_y_continuous(label = scales::percent)+
+  scale_x_continuous(breaks = c(2010,2011,2012,2013,2014,2015,2016,2017))+
+  labs(x = "", y = "Percent Transported Lost to Accidents")+
+  theme_bw()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.title = element_blank(),
+        text = element_text(size = 16, family = "Franklin Gothic Book"))
+
+ggsave(filename = "Percent.png", path = "C:/Users/wangly0/Desktop", height = 6, width = 8)
+```
+
+
+
+
+
